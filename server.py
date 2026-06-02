@@ -280,11 +280,15 @@ async def verify_code(req: VerifyCodeRequest, request: Request, background: Back
                               redirect_url=REDIRECT_URL)
 
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=False,          # ← required when allow_origins=["*"]
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(api_router)
-app.add_middleware(CORSMiddleware,
-                   allow_credentials=True,
-                   allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-                   allow_methods=["*"], allow_headers=["*"])
+
 logging.basicConfig(level=logging.INFO)
 
 @app.on_event("shutdown")
