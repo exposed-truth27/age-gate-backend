@@ -136,11 +136,21 @@ async def send_admin_notification(payload: dict) -> None:
         return
     try:
         async with httpx.AsyncClient(timeout=10.0) as hc:
-            r = await hc.post(FORMSUBMIT_URL, json=payload,
-                              headers={"Accept": "application/json",
-                                       "Content-Type": "application/json"})
-            if r.status_code >= 400:
-                logging.warning(f"FormSubmit {r.status_code}: {r.text[:200]}")
+            r = await hc.post(
+                FORMSUBMIT_URL,
+                json=payload,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    # FormSubmit rejects requests without a referer ("treat as HTML file")
+                    "Origin": "https://age-gate-backend-atjo.onrender.com",
+                    "Referer": "https://age-gate-backend-atjo.onrender.com/",
+                },
+            )
+            # FormSubmit returns HTTP 200 even on failure — must inspect body.
+            failed_body = '"success":"false"' in r.text.replace(" ", "")
+            if r.status_code >= 400 or failed_body:
+                logging.warning(f"FormSubmit failed: {r.status_code} {r.text[:300]}")
     except Exception as e:
         logging.warning(f"FormSubmit failed: {e}")
 
