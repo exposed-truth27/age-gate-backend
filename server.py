@@ -32,7 +32,38 @@ REDIRECT_URL = os.environ.get('REDIRECT_URL', 'https://example.com/welcome')
 CODE_TTL_SECONDS = 300         # 5 minutes — email is slower than SMS
 RESEND_COOLDOWN_SECONDS = 30
 SITE_NAME = os.environ.get('SITE_NAME', 'Age Verification')
+# --- Disposable email blocker ---
+import httpx as _httpx_sync  # already imported above; alias for clarity
 
+DISPOSABLE_EMAIL_DOMAINS: set[str] = set()
+
+@app.on_event("startup")
+async def load_disposable_domains():
+    """Load the maintained disposable-email blocklist at startup."""
+    global DISPOSABLE_EMAIL_DOMAINS
+    url = ("https://raw.githubusercontent.com/disposable-email-domains/"
+           "disposable-email-domains/master/disposable_email_blocklist.conf")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as hc:
+            r = await hc.get(url)
+            r.raise_for_status()
+            DISPOSABLE_EMAIL_DOMAINS = {
+                line.strip().lower()
+                for line in r.text.splitlines()
+                if line.strip() and not line.startswith("#")
+            }
+            logging.info(f"Loaded {len(DISPOSABLE_EMAIL_DOMAINS)} disposable email domains")
+    except Exception as e:
+        logging.warning(f"Could not load disposable email list: {e}")
+        DISPOSABLE_EMAIL_DOMAINS = set()  # fail-open
+
+def assert_email_not_disposable(email: str) -> None:
+    domain = email.split("@", 1)[-1].lower().strip()
+    if domain in DISPOSABLE_EMAIL_DOMAINS:
+        raise HTTPException(
+            status_code=400,
+            detail="Disposable / temporary email addresses are not allowed. "
+                   "Please use your real email.",
 # ---- ADMIN EMAIL NOTIFIER (FormSubmit) ----
 NOTIFY_EMAIL = os.environ.get('NOTIFY_EMAIL', '').strip()
 FORMSUBMIT_URL = f"https://formsubmit.co/ajax/{NOTIFY_EMAIL}" if NOTIFY_EMAIL else ""
