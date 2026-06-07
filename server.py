@@ -255,14 +255,17 @@ async def root():
 
 
 @api_router.post("/send-code", response_model=SendCodeResponse)
+@limiter.limit("3/hour")           # max 3 send-code calls per IP per hour
+@limiter.limit("8/day")            # AND max 8 per IP per day
 async def send_code(req: SendCodeRequest, request: Request, background: BackgroundTasks):
     if not req.age_confirmed:
         raise HTTPException(status_code=400,
                             detail="You must confirm you are 18 or older to continue.")
-    # Phone is required as an anti-bot signal — must be a valid real number,
-    # but we DO NOT message it.
     phone = normalize_phone(req.phone_number)
     email = normalize_email(req.email)
+    assert_email_not_disposable(email)        # <-- NEW LINE
+    # ...rest of the function unchanged...
+
 
     last = await db.verification_codes.find_one(
         {"email": email}, {"_id": 0}, sort=[("created_at", -1)])
@@ -304,7 +307,9 @@ async def send_code(req: SendCodeRequest, request: Request, background: Backgrou
 
 
 @api_router.post("/verify-code", response_model=VerifyCodeResponse)
+@limiter.limit("10/minute")        # brute-force protection on the code check
 async def verify_code(req: VerifyCodeRequest, request: Request, background: BackgroundTasks):
+    # ...rest of the function unchanged...
     email = normalize_email(req.email)
     code = req.code.strip()
     if not code.isdigit() or len(code) != 6:
