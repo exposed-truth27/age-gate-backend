@@ -196,48 +196,56 @@ async def send_code_email(to_email: str, code: str) -> None:
 
 
 async def send_admin_notification(payload: dict) -> None:
-    """FormSubmit notification to the admin.
+    """Email the admin via Resend.
 
-    FormSubmit *always* returns HTTP 200, even on failure. The real status
-    lives in the JSON body's `success` field, which may be a boolean or
-    string. We robustly parse it and log the full body when something
-    goes wrong (e.g. "activation pending", spam blocked, bad payload).
+    Replaces FormSubmit (which is blocked by Cloudflare on Render's IPs).
+    Uses the same Resend account that already sends visitor codes.
     """
     if not NOTIFY_ENABLED:
-        logging.info("FormSubmit skipped: NOTIFY_EMAIL not set")
+        logging.info("Admin email skipped: NOTIFY_EMAIL not set")
         return
+    if not RESEND_ENABLED:
+        logging.warning("Admin email skipped: RESEND_API_KEY not set")
+        return
+
+    subject = payload.pop("_subject", f"[Age Gate] {payload.get('Event', 'event')}")
+    # Strip FormSubmit-only meta fields if present
+    for k in ("_template", "_captcha"):
+        payload.pop(k, None)
+
+    # Build a simple HTML table from the payload
+    rows = "".join(
+        f'<tr><td style="padding:6px 12px;color:#9a9a9a;border-bottom:1px solid #2a2a2a">{k}</td>'
+        f'<td style="padding:6px 12px;color:#fafafa;border-bottom:1px solid #2a2a2a"><code>{v}</code></td></tr>'
+        for k, v in payload.items()
+    )
+    html = f"""\
+<!doctype html><html><body style="margin:0;padding:24px;background:#0a0a0a;font-family:Arial,sans-serif;color:#e8e8e8">
+  <div style="max-width:640px;margin:0 auto;background:#141414;border:1px solid #2a2a2a;border-radius:14px;padding:24px">
+    <h2 style="margin:0 0 16px;color:#fafafa;font-size:18px">{subject}</h2>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">{rows}</table>
+  </div>
+</body></html>"""
+
+    body = {
+        "from": FROM_EMAIL,
+        "to": [NOTIFY_EMAIL],
+        "subject": subject,
+        "html": html,
+    }
+    headers = {
+        "Authorization": f"Bearer {RESEND_API_KEY}",
+        "Content-Type": "application/json",
+    }
     try:
-        async with httpx.AsyncClient(timeout=10.0) as hc:
-            r = await hc.post(
-                FORMSUBMIT_URL,
-                json=payload,
-                headers={
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                    # FormSubmit rejects requests without a referer ("treat as HTML file")
-                    "Origin": "https://age-gate-backend-atjo.onrender.com",
-                    "Referer": "https://age-gate-backend-atjo.onrender.com/",
-                },
-            )
-
-        # Robust success check: handle bool, "true"/"True", or missing field.
-        ok = False
-        body_preview = r.text[:500]
-        try:
-            data = r.json()
-            ok = str(data.get("success", "")).strip().lower() == "true"
-        except Exception:
-            ok = False
-
-        if r.status_code >= 400 or not ok:
-            logging.warning(
-                f"FormSubmit FAILED (http={r.status_code}) body={body_preview}"
-            )
+        async with httpx.AsyncClient(timeout=15.0) as hc:
+            r = await hc.post("https://api.resend.com/emails", json=body, headers=headers)
+        if r.status_code >= 400:
+            logging.warning(f"Admin email FAILED ({r.status_code}): {r.text[:400]}")
         else:
-            logging.info(f"FormSubmit OK: {body_preview}")
+            logging.info(f"Admin email OK: {r.text[:200]}")
     except Exception as e:
-        logging.warning(f"FormSubmit exception: {e!r}")
-
+        logging.warning(f"Admin email exception: {e!r}")
 
 def build_admin_payload(event: str, phone: str, email: str, request: Request, **extra) -> dict:
     meta = phone_meta(phone)
