@@ -112,6 +112,10 @@ class VerifyCodeResponse(BaseModel):
 
 
 # ---- Helpers ----
+ALLOWED_NUMBER_TYPES = {
+    PhoneNumberType.MOBILE
+}
+
 def normalize_phone(raw: str) -> str:
     raw = raw.strip()
     try:
@@ -120,6 +124,14 @@ def normalize_phone(raw: str) -> str:
         raise HTTPException(status_code=400, detail="Invalid phone number format")
     if not phonenumbers.is_valid_number(parsed):
         raise HTTPException(status_code=400, detail="Invalid phone number")
+
+    ntype = number_type(parsed)
+    if ntype not in ALLOWED_NUMBER_TYPES:
+        # VOIP, PERSONAL_NUMBER, PAGER, UAN, VOICEMAIL, SHARED_COST, TOLL_FREE, PREMIUM_RATE, FIXED_LINE
+        raise HTTPException(
+            status_code=400,
+            detail="That number type isn't accepted. Please use a real mobile number.",
+        )
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
 def normalize_email(raw: str) -> str:
