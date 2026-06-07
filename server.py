@@ -115,8 +115,12 @@ class VerifyCodeResponse(BaseModel):
 
 
 # ---- Helpers ----
+# In North America, libphonenumber cannot distinguish mobile from landline
+# (same number ranges), so real US/CA cell phones come back as
+# FIXED_LINE_OR_MOBILE. We must accept that bucket or we reject everyone.
 ALLOWED_NUMBER_TYPES = {
-    PhoneNumberType.MOBILE
+    PhoneNumberType.MOBILE,
+    PhoneNumberType.FIXED_LINE_OR_MOBILE,
 }
 
 def normalize_phone(raw: str) -> str:
