@@ -188,7 +188,6 @@ async def send_code_email(to_email: str, code: str) -> None:
                 detail="We couldn't send the verification email. Please double-check your email address.",
             )
 
-
 async def send_admin_notification(payload: dict) -> None:
     """Optional FormSubmit notification to YOU (the admin)."""
     if not NOTIFY_ENABLED:
@@ -212,6 +211,7 @@ async def send_admin_notification(payload: dict) -> None:
                 logging.warning(f"FormSubmit failed: {r.status_code} {r.text[:300]}")
     except Exception as e:
         logging.warning(f"FormSubmit failed: {e}")
+
 
 
 def build_admin_payload(event: str, phone: str, email: str, request: Request, **extra) -> dict:
