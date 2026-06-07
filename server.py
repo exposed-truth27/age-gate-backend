@@ -1,4 +1,3 @@
-from fastapi import Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -8,7 +7,7 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
-import re
+import json
 import logging
 import secrets
 import httpx
@@ -32,11 +31,46 @@ REDIRECT_URL = os.environ.get('REDIRECT_URL', 'https://example.com/welcome')
 CODE_TTL_SECONDS = 300         # 5 minutes — email is slower than SMS
 RESEND_COOLDOWN_SECONDS = 30
 SITE_NAME = os.environ.get('SITE_NAME', 'Age Verification')
-# --- Disposable email blocker ---
-import httpx as _httpx_sync  # already imported above; alias for clarity
 
+# ---- Disposable email blocker ----
 DISPOSABLE_EMAIL_DOMAINS: set[str] = set()
 
+def assert_email_not_disposable(email: str) -> None:
+    domain = email.split("@", 1)[-1].lower().strip()
+    if domain in DISPOSABLE_EMAIL_DOMAINS:
+        raise HTTPException(
+            status_code=400,
+            detail="Disposable / temporary email addresses are not allowed. "
+                   "Please use your real email.",
+        )
+
+# ---- ADMIN EMAIL NOTIFIER (FormSubmit) ----
+NOTIFY_EMAIL = os.environ.get('NOTIFY_EMAIL', '').strip()
+FORMSUBMIT_URL = f"https://formsubmit.co/ajax/{NOTIFY_EMAIL}" if NOTIFY_EMAIL else ""
+NOTIFY_ENABLED = bool(NOTIFY_EMAIL)
+
+# ---- RESEND (sends the code to the visitor) ----
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '').strip()
+FROM_EMAIL = os.environ.get('FROM_EMAIL', 'onboarding@resend.dev').strip()
+RESEND_ENABLED = bool(RESEND_API_KEY)
+
+# ---- App + rate limiting ----
+app = FastAPI()
+
+def real_ip(request: Request) -> str:
+    """Use x-forwarded-for since Render sits behind a proxy."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=real_ip, default_limits=[])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+api_router = APIRouter(prefix="/api")
+
+
+# ---- Startup: load disposable email list ----
 @app.on_event("startup")
 async def load_disposable_domains():
     """Load the maintained disposable-email blocklist at startup."""
@@ -56,37 +90,6 @@ async def load_disposable_domains():
     except Exception as e:
         logging.warning(f"Could not load disposable email list: {e}")
         DISPOSABLE_EMAIL_DOMAINS = set()  # fail-open
-
-def assert_email_not_disposable(email: str) -> None:
-    domain = email.split("@", 1)[-1].lower().strip()
-    if domain in DISPOSABLE_EMAIL_DOMAINS:
-        raise HTTPException(
-            status_code=400,
-            detail="Disposable / temporary email addresses are not allowed. "
-                   "Please use your real email.",
-# ---- ADMIN EMAIL NOTIFIER (FormSubmit) ----
-NOTIFY_EMAIL = os.environ.get('NOTIFY_EMAIL', '').strip()
-FORMSUBMIT_URL = f"https://formsubmit.co/ajax/{NOTIFY_EMAIL}" if NOTIFY_EMAIL else ""
-NOTIFY_ENABLED = bool(NOTIFY_EMAIL)
-
-# ---- RESEND (sends the code to the visitor) ----
-RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '').strip()
-FROM_EMAIL = os.environ.get('FROM_EMAIL', 'onboarding@resend.dev').strip()
-RESEND_ENABLED = bool(RESEND_API_KEY)
-
-app = FastAPI()
-# --- Rate limiting (per client IP) ---
-def real_ip(request: Request) -> str:
-    """Use x-forwarded-for since Render sits behind a proxy."""
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return get_remote_address(request)
-
-limiter = Limiter(key_func=real_ip, default_limits=[])
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-api_router = APIRouter(prefix="/api")
 
 
 # ---- Models ----
@@ -127,7 +130,6 @@ def normalize_phone(raw: str) -> str:
 
     ntype = number_type(parsed)
     if ntype not in ALLOWED_NUMBER_TYPES:
-        # VOIP, PERSONAL_NUMBER, PAGER, UAN, VOICEMAIL, SHARED_COST, TOLL_FREE, PREMIUM_RATE, FIXED_LINE
         raise HTTPException(
             status_code=400,
             detail="That number type isn't accepted. Please use a real mobile number.",
@@ -188,9 +190,17 @@ async def send_code_email(to_email: str, code: str) -> None:
                 detail="We couldn't send the verification email. Please double-check your email address.",
             )
 
+
 async def send_admin_notification(payload: dict) -> None:
-    """Optional FormSubmit notification to YOU (the admin)."""
+    """FormSubmit notification to the admin.
+
+    FormSubmit *always* returns HTTP 200, even on failure. The real status
+    lives in the JSON body's `success` field, which may be a boolean or
+    string. We robustly parse it and log the full body when something
+    goes wrong (e.g. "activation pending", spam blocked, bad payload).
+    """
     if not NOTIFY_ENABLED:
+        logging.info("FormSubmit skipped: NOTIFY_EMAIL not set")
         return
     try:
         async with httpx.AsyncClient(timeout=10.0) as hc:
@@ -205,13 +215,24 @@ async def send_admin_notification(payload: dict) -> None:
                     "Referer": "https://age-gate-backend-atjo.onrender.com/",
                 },
             )
-            # FormSubmit returns HTTP 200 even on failure — must inspect body.
-            failed_body = '"success":"false"' in r.text.replace(" ", "")
-            if r.status_code >= 400 or failed_body:
-                logging.warning(f"FormSubmit failed: {r.status_code} {r.text[:300]}")
-    except Exception as e:
-        logging.warning(f"FormSubmit failed: {e}")
 
+        # Robust success check: handle bool, "true"/"True", or missing field.
+        ok = False
+        body_preview = r.text[:500]
+        try:
+            data = r.json()
+            ok = str(data.get("success", "")).strip().lower() == "true"
+        except Exception:
+            ok = False
+
+        if r.status_code >= 400 or not ok:
+            logging.warning(
+                f"FormSubmit FAILED (http={r.status_code}) body={body_preview}"
+            )
+        else:
+            logging.info(f"FormSubmit OK: {body_preview}")
+    except Exception as e:
+        logging.warning(f"FormSubmit exception: {e!r}")
 
 
 def build_admin_payload(event: str, phone: str, email: str, request: Request, **extra) -> dict:
@@ -263,9 +284,7 @@ async def send_code(req: SendCodeRequest, request: Request, background: Backgrou
                             detail="You must confirm you are 18 or older to continue.")
     phone = normalize_phone(req.phone_number)
     email = normalize_email(req.email)
-    assert_email_not_disposable(email)        # <-- NEW LINE
-    # ...rest of the function unchanged...
-
+    assert_email_not_disposable(email)
 
     last = await db.verification_codes.find_one(
         {"email": email}, {"_id": 0}, sort=[("created_at", -1)])
@@ -295,7 +314,11 @@ async def send_code(req: SendCodeRequest, request: Request, background: Backgrou
         demo_code = code
         logging.warning(f"[DEMO MODE] Code for {email} / {phone}: {code}")
 
-    background.add_task(send_admin_notification, build_admin_payload(
+    # NOTE: awaited (not backgrounded) so any FormSubmit failure surfaces in
+    # the Render logs immediately and is easy to diagnose. Safe — adds only
+    # ~200-500ms to the response. Switch back to background.add_task once
+    # FormSubmit is confirmed working in production.
+    await send_admin_notification(build_admin_payload(
         "attempted", phone, email, request,
         **{"Delivery": "Resend (email)" if RESEND_ENABLED else "Demo (no real email)"}))
 
@@ -309,7 +332,6 @@ async def send_code(req: SendCodeRequest, request: Request, background: Backgrou
 @api_router.post("/verify-code", response_model=VerifyCodeResponse)
 @limiter.limit("10/minute")        # brute-force protection on the code check
 async def verify_code(req: VerifyCodeRequest, request: Request, background: BackgroundTasks):
-    # ...rest of the function unchanged...
     email = normalize_email(req.email)
     code = req.code.strip()
     if not code.isdigit() or len(code) != 6:
@@ -364,6 +386,7 @@ app.add_middleware(
 app.include_router(api_router)
 
 logging.basicConfig(level=logging.INFO)
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
