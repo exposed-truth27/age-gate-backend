@@ -1,3 +1,8 @@
+from fastapi import Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from phonenumbers import PhoneNumberType, number_type
 from fastapi import FastAPI, APIRouter, HTTPException, Request, BackgroundTasks
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
