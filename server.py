@@ -44,6 +44,17 @@ FROM_EMAIL = os.environ.get('FROM_EMAIL', 'onboarding@resend.dev').strip()
 RESEND_ENABLED = bool(RESEND_API_KEY)
 
 app = FastAPI()
+# --- Rate limiting (per client IP) ---
+def real_ip(request: Request) -> str:
+    """Use x-forwarded-for since Render sits behind a proxy."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=real_ip, default_limits=[])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 api_router = APIRouter(prefix="/api")
 
 
