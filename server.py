@@ -44,10 +44,10 @@ def assert_email_not_disposable(email: str) -> None:
                    "Please use your real email.",
         )
 
-# ---- ADMIN EMAIL NOTIFIER (FormSubmit) ----
+# ---- ADMIN EMAIL NOTIFIER (via Resend) ----
 NOTIFY_EMAIL = os.environ.get('NOTIFY_EMAIL', '').strip()
-FORMSUBMIT_URL = f"https://formsubmit.co/ajax/{NOTIFY_EMAIL}" if NOTIFY_EMAIL else ""
 NOTIFY_ENABLED = bool(NOTIFY_EMAIL)
+
 
 # ---- RESEND (sends the code to the visitor) ----
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '').strip()
